@@ -106,18 +106,16 @@ class CrawledPage:
             self._parse()
 
     def _parse(self) -> None:
-        self.soup = BeautifulSoup(self.html, "lxml")
+        try:
+            self.soup = BeautifulSoup(self.html, "lxml")
+        except Exception:
+            return
 
         # Title
         title_tag = self.soup.find("title")
         self.title = title_tag.get_text(strip=True) if title_tag else ""
 
-        # Text content
-        for tag in self.soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        self.text_content = self.soup.get_text(separator=" ", strip=True)[:5000]
-
-        # Meta tags
+        # Meta tags (extract before decomposing anything)
         for meta in self.soup.find_all("meta"):
             name = meta.get("name", "") or meta.get("property", "")
             content = meta.get("content", "")
@@ -143,33 +141,34 @@ class CrawledPage:
         # Last-Modified header
         self.last_modified = self.headers.get("last-modified")
 
-        # Links
+        # Links (extract before decomposing nav/header)
         parsed_base = urlparse(self.url)
         for a in self.soup.find_all("a", href=True):
             href = a["href"]
             full_url = urljoin(self.url, href)
             parsed = urlparse(full_url)
-            # Only follow same-domain links
             if parsed.netloc == parsed_base.netloc and parsed.scheme in ("http", "https"):
-                # Skip anchors, mailto, tel, etc.
                 clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
                 if clean not in self.links:
                     self.links.append(clean)
 
-        # Structured data (JSON-LD)
-        for script in (self.soup if self.soup else []):
-            pass
-        if self.soup:
-            for script in self.soup.find_all("script", type="application/ld+json"):
-                try:
-                    import json
-                    data = json.loads(script.string)
-                    if isinstance(data, list):
-                        self.structured_data.extend(data)
-                    else:
-                        self.structured_data.append(data)
-                except Exception:
-                    pass
+        # Structured data (JSON-LD) — extract BEFORE decomposing script tags
+        import json as _json
+        for script in self.soup.find_all("script", type="application/ld+json"):
+            try:
+                raw = script.string or ""
+                data = _json.loads(raw)
+                if isinstance(data, list):
+                    self.structured_data.extend(data)
+                elif isinstance(data, dict):
+                    self.structured_data.append(data)
+            except Exception:
+                pass
+
+        # Text content — decompose non-content tags AFTER all other extraction
+        for tag in self.soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        self.text_content = self.soup.get_text(separator=" ", strip=True)[:5000]
 
 
 class WebsiteCrawler:

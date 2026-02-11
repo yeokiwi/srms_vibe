@@ -6,7 +6,9 @@ import FindingsList from './components/FindingsList.jsx';
 import ExportBar from './components/ExportBar.jsx';
 import { startAnalysis, getAnalysis } from './api.js';
 
-const POLL_INTERVAL = 1500;
+const POLL_INTERVAL = 2000;
+const MAX_POLL_TIME = 180000; // 3 minutes max
+const MAX_POLL_ERRORS = 3;    // Tolerate transient failures
 
 export default function App() {
   const [result, setResult] = useState(null);
@@ -30,11 +32,21 @@ export default function App() {
     try {
       const task = await startAnalysis(formData);
       const taskId = task.task_id;
+      const startedAt = Date.now();
+      let consecutiveErrors = 0;
 
       // Poll for results
       const poll = async () => {
+        // Timeout check
+        if (Date.now() - startedAt > MAX_POLL_TIME) {
+          setError('Analysis timed out after 3 minutes. The website may be too large or slow to respond.');
+          setLoading(false);
+          return;
+        }
+
         try {
           const status = await getAnalysis(taskId);
+          consecutiveErrors = 0; // Reset on success
           setProgress(status.progress || 0);
           setProgressMessage(status.progress_message || '');
 
@@ -48,8 +60,14 @@ export default function App() {
             setTimeout(poll, POLL_INTERVAL);
           }
         } catch (err) {
-          setError(err.message);
-          setLoading(false);
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_POLL_ERRORS) {
+            setError(err.message);
+            setLoading(false);
+          } else {
+            // Retry after a short delay
+            setTimeout(poll, POLL_INTERVAL * 2);
+          }
         }
       };
 

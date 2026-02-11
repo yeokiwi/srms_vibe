@@ -16,7 +16,8 @@ export async function startAnalysis({ url, sections, days }) {
 export async function getAnalysis(taskId) {
   const resp = await fetch(`${API_BASE}/analyze/${taskId}`);
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}`);
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
   }
   return resp.json();
 }

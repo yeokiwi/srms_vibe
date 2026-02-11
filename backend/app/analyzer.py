@@ -63,7 +63,7 @@ def _parse_date(date_str: str) -> Optional[datetime]:
         return None
     try:
         return dateutil_parser.parse(date_str, fuzzy=True)
-    except (ValueError, OverflowError):
+    except (ValueError, OverflowError, TypeError):
         return None
 
 

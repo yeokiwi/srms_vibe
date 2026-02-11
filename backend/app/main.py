@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -44,6 +45,51 @@ app.add_middleware(
 cache = MemoryCache(default_ttl=3600)
 tasks: dict[str, AnalysisResponse] = {}
 
+# Keep references to background tasks so they aren't garbage-collected
+_background_tasks: set[asyncio.Task] = set()
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler — prevents bare 500 responses
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.url}: {exc}\n{traceback.format_exc()}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper to safely serialize a task to a JSON-safe dict
+# ---------------------------------------------------------------------------
+
+def _safe_task_dict(task: AnalysisResponse) -> dict:
+    """Serialize task to a plain dict, catching any serialization errors."""
+    try:
+        return task.model_dump(mode="json")
+    except Exception:
+        # Fallback: return minimal safe data
+        return {
+            "task_id": task.task_id,
+            "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+            "url": task.url,
+            "days": task.days,
+            "progress": task.progress,
+            "progress_message": task.progress_message,
+            "summary": None,
+            "findings": [],
+            "errors": task.errors + ["Response serialization failed"],
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Background analysis runner
+# ---------------------------------------------------------------------------
 
 async def _run_analysis(task_id: str, request: AnalysisRequest) -> None:
     """Background task to run crawl + analysis."""
@@ -90,7 +136,7 @@ async def _run_analysis(task_id: str, request: AnalysisRequest) -> None:
             "summary": summary,
         })
 
-    except Exception as e:
+    except BaseException as e:
         logger.exception(f"Analysis failed for {request.url}")
         task.status = AnalysisStatus.ERROR
         task.errors.append(str(e))
@@ -106,7 +152,7 @@ async def health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/analyze", response_model=AnalysisResponse)
+@app.post("/api/analyze")
 async def start_analysis(request: AnalysisRequest):
     """Start a new website analysis. Returns a task ID for polling."""
     task_id = str(uuid.uuid4())
@@ -118,18 +164,20 @@ async def start_analysis(request: AnalysisRequest):
     )
     tasks[task_id] = task
 
-    # Run in background
-    asyncio.create_task(_run_analysis(task_id, request))
+    # Run in background — keep a strong reference to prevent GC
+    bg_task = asyncio.create_task(_run_analysis(task_id, request))
+    _background_tasks.add(bg_task)
+    bg_task.add_done_callback(_background_tasks.discard)
 
-    return task
+    return JSONResponse(content=_safe_task_dict(task))
 
 
-@app.get("/api/analyze/{task_id}", response_model=AnalysisResponse)
+@app.get("/api/analyze/{task_id}")
 async def get_analysis(task_id: str):
     """Get the status and results of an analysis task."""
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
-    return tasks[task_id]
+    return JSONResponse(content=_safe_task_dict(tasks[task_id]))
 
 
 @app.get("/api/analyze/{task_id}/export/json")
@@ -170,7 +218,11 @@ async def export_analysis_pdf(task_id: str):
     task = tasks[task_id]
     if task.status != AnalysisStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Analysis not yet complete")
-    pdf_bytes = export_pdf(task)
+    try:
+        pdf_bytes = export_pdf(task)
+    except Exception as e:
+        logger.exception("PDF export failed")
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
