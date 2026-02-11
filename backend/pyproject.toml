@@ -1,0 +1,9 @@
+[project]
+name = "website-change-analyzer"
+version = "1.0.0"
+description = "Analyze websites for recent changes, updates, and announcements"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
